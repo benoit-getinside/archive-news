@@ -11,9 +11,9 @@ import requests
 GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
 TARGET_LABEL = "Netlify-News"
+# IMPORTANT : Pour GitHub Pages, on utilise souvent le dossier 'docs'
 OUTPUT_FOLDER = "docs"
 
-# On se fait passer pour un navigateur pour éviter d'être bloqué par les serveurs d'images
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
@@ -22,10 +22,43 @@ def clean_filename(text):
     s = re.sub(r'[\\/*?:"<>|]', "", text)
     return s.replace(" ", "_")[:50]
 
+def create_landing_page():
+    # Crée une page d'accueil neutre pour éviter l'erreur 404
+    # Mais ne liste PAS les newsletters pour la confidentialité.
+    index_content = """
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Espace Archivage</title>
+        <style>
+            body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f4f9; color: #555; }
+            .box { text-align: center; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h1>🔒 Espace Archivage</h1>
+            <p>Cet espace est réservé au stockage des newsletters.</p>
+        </div>
+    </body>
+    </html>
+    """
+    if not os.path.exists(OUTPUT_FOLDER):
+        os.makedirs(OUTPUT_FOLDER)
+        
+    with open(f"{OUTPUT_FOLDER}/index.html", "w", encoding='utf-8') as f:
+        f.write(index_content)
+    print("Page d'accueil neutre générée.")
+
 def process_emails():
     try:
         if not os.path.exists(OUTPUT_FOLDER):
             os.makedirs(OUTPUT_FOLDER)
+
+        # On s'assure que la page d'accueil existe toujours
+        create_landing_page()
 
         print("Connexion au serveur...")
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -39,7 +72,7 @@ def process_emails():
                 status, msg_data = mail.fetch(num, "(RFC822)")
                 msg = email.message_from_bytes(msg_data[0][1])
                 
-                # --- 1. TITRE ---
+                # --- SUJET ---
                 subject_header = msg["Subject"]
                 if subject_header:
                     decoded_list = decode_header(subject_header)
@@ -52,95 +85,65 @@ def process_emails():
                 safe_subject = clean_filename(subject)
                 print(f"Traitement de : {subject}")
 
-                # --- 2. EXTRACTION CONTENU ---
+                # --- CONTENU ---
                 html_content = ""
-                
                 for part in msg.walk():
                     content_type = part.get_content_type()
                     content_disposition = str(part.get("Content-Disposition"))
-
                     if content_type == "text/html" and "attachment" not in content_disposition:
                         html_content = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8')
-                        break # On a trouvé le HTML principal
+                        break
                 
-                # Fallback si pas de multipart
                 if not html_content and not msg.is_multipart():
                     html_content = msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8')
 
-                if not html_content: 
-                    print("  -> Pas de contenu HTML trouvé.")
-                    continue
+                if not html_content: continue
 
-                # --- 3. TRAITEMENT & TÉLÉCHARGEMENT IMAGES ---
+                # --- IMAGES ---
                 soup = BeautifulSoup(html_content, "html.parser")
-
-                # A. Suppression scripts dangereux
+                
                 for s in soup(["script", "iframe", "object"]):
                     s.extract()
 
-                # B. Gestion des images (Le coeur du correctif)
                 img_counter = 0
                 for img in soup.find_all("img"):
                     src = img.get("src")
-                    
-                    if not src:
-                        continue
-
-                    # Si c'est déjà une image base64 ou cid, on passe (cid géré par ailleurs si besoin, mais ici on vise les liens http)
-                    if src.startswith("data:") or src.startswith("cid:"):
+                    if not src or src.startswith("data:") or src.startswith("cid:"):
                         continue
 
                     try:
-                        # Gestion des liens relatifs protocol-less (//example.com)
-                        if src.startswith("//"):
-                            src = "https:" + src
+                        if src.startswith("//"): src = "https:" + src
                         
-                        # Téléchargement
                         response = requests.get(src, headers=HEADERS, timeout=10)
                         if response.status_code == 200:
-                            # Déterminer l'extension
                             content_type = response.headers.get('content-type')
                             ext = mimetypes.guess_extension(content_type) or ".jpg"
-                            
-                            # Nom unique pour l'image
                             img_name = f"{safe_subject}_img_{img_counter}{ext}"
                             img_path = os.path.join(OUTPUT_FOLDER, img_name)
                             
-                            # Sauvegarde locale
                             with open(img_path, "wb") as f:
                                 f.write(response.content)
                             
-                            # Remplacement du lien dans le HTML par le fichier local
                             img['src'] = img_name
-                            # On retire srcset pour forcer l'usage du src local
-                            if img.has_attr('srcset'):
-                                del img['srcset']
-                                
+                            if img.has_attr('srcset'): del img['srcset']
                             img_counter += 1
-                            print(f"  -> Image téléchargée : {src[:30]}...")
-                        else:
-                            print(f"  -> Échec téléchargement (Code {response.status_code}): {src[:30]}...")
-                    
-                    except Exception as e:
-                        print(f"  -> Erreur téléchargement image : {e}")
-                        # En cas d'erreur, on laisse le lien original
+                    except Exception:
+                        pass # On ignore les erreurs d'image pour ne pas bloquer
 
-                # --- 4. SAUVEGARDE ---
-                # On ne met PLUS le bouton retour
+                # --- SAUVEGARDE ---
                 filename = f"{OUTPUT_FOLDER}/{safe_subject}.html"
                 with open(filename, "w", encoding='utf-8') as f:
                     f.write(str(soup))
                     
             print("Traitement terminé.")
         else:
-            print("Aucun nouvel email à traiter.")
+            print("Aucun nouvel email.")
 
         mail.close()
         mail.logout()
-        # On ne génère plus l'index pour la confidentialité (ou on le garde secret sans liens vers lui)
 
     except Exception as e:
-        print(f"Erreur critique : {e}")
+        print(f"Erreur: {e}")
         raise e
 
 if __name__ == "__main__":
