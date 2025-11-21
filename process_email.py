@@ -11,7 +11,7 @@ import requests
 GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
 TARGET_LABEL = "Netlify-News"
-OUTPUT_FOLDER = "newsletters"
+OUTPUT_FOLDER = "docs"
 
 # On se fait passer pour un navigateur pour éviter d'être bloqué par les serveurs d'images
 HEADERS = {
