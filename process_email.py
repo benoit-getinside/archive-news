@@ -18,7 +18,8 @@ def clean_filename(subject):
 def generate_index():
     print("Génération du sommaire...")
     files = [f for f in os.listdir(OUTPUT_FOLDER) if f.endswith(".html") and f != "index.html"]
-    files.sort(reverse=True) # On met les plus récents en haut (si tri par nom/date)
+    # Tri par date de modification (le plus récent en haut)
+    files.sort(key=lambda x: os.path.getmtime(os.path.join(OUTPUT_FOLDER, x)), reverse=True)
 
     links_html = ""
     for f in files:
@@ -63,6 +64,7 @@ def process_emails():
         mail.login(GMAIL_USER, GMAIL_PASSWORD)
         mail.select(TARGET_LABEL)
         
+        # On cherche tous les emails (pas seulement UNSEEN pour ce test si besoin, sinon remettre 'UNSEEN')
         status, messages = mail.search(None, 'UNSEEN')
         
         if messages[0]:
@@ -70,7 +72,6 @@ def process_emails():
                 status, msg_data = mail.fetch(num, "(RFC822)")
                 msg = email.message_from_bytes(msg_data[0][1])
                 
-                # Décodage Sujet
                 subject_header = msg["Subject"]
                 if subject_header:
                     decoded_list = decode_header(subject_header)
@@ -82,7 +83,6 @@ def process_emails():
 
                 print(f"Traitement de : {subject}")
 
-                # Extraction HTML
                 html_content = ""
                 if msg.is_multipart():
                     for part in msg.walk():
@@ -94,40 +94,34 @@ def process_emails():
 
                 if not html_content: continue
 
-                # --- NOUVELLE LOGIQUE DE NETTOYAGE (DOUCE) ---
+                # --- CORRECTION MAJEURE : FIDÉLITÉ TOTALE ---
                 soup = BeautifulSoup(html_content, "html.parser")
                 
-                # 1. SÉCURITÉ : On retire UNIQUEMENT les scripts (JS), mais ON GARDE le style (CSS)
+                # 1. On enlève les scripts (JS) par sécurité
                 for s in soup(["script"]):
                     s.extract()
 
-                # 2. SUPPRESSION GMAIL : Si c'est un forward, on retire le bloc de citation Gmail
-                # Les classes souvent utilisées par Gmail : .gmail_quote, .gmail_attr
-                for gmail_div in soup.select('.gmail_quote, .gmail_attr'):
-                    gmail_div.extract()
-
-                # 3. CONSTRUCTION DE LA PAGE
-                # Si le mail a déjà une structure HTML complète (head/body), on la garde telle quelle
-                # Sinon, on l'enveloppe pour que l'encodage soit bon.
-                if soup.html:
-                    # On injecte juste un petit bouton retour en haut du body existant
-                    back_button = soup.new_tag("a", href="index.html")
-                    back_button.string = "← Retour au sommaire"
-                    back_button['style'] = "display:block; padding:10px; background:#333; color:white; text-decoration:none; font-family:sans-serif; font-size:14px; text-align:center;"
-                    
-                    if soup.body:
-                        soup.body.insert(0, back_button)
-                    
-                    final_html = str(soup) # On garde la structure exacte
+                # 2. On enlève les métadonnées de transfert Gmail (si le mail a été transféré)
+                # (Ex: "De: Machin, Envoyé le: ...")
+                for gmail_attr in soup.select('.gmail_attr'):
+                    gmail_attr.extract()
+                
+                # 3. On ne cherche PAS de table spécifique. On prend TOUT le HTML.
+                # On ajoute juste le bouton retour en haut.
+                
+                final_html = str(soup)
+                
+                # Ajout du bouton retour de manière "propre" sans casser la structure
+                # On l'injecte juste après l'ouverture du <body>
+                back_btn_html = '<a href="index.html" style="display:block; padding:10px; background:#222; color:white; text-decoration:none; font-family:sans-serif; font-size:14px; text-align:center; position:relative; z-index:9999;">← Retour au sommaire</a>'
+                
+                if "<body>" in final_html:
+                     final_html = final_html.replace("<body>", f"<body>{back_btn_html}")
+                elif "<BODY>" in final_html: # Au cas où c'est en majuscules
+                     final_html = final_html.replace("<BODY>", f"<BODY>{back_btn_html}")
                 else:
-                    # Cas rare : HTML partiel
-                    final_html = f"""
-                    <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{subject}</title></head>
-                    <body>
-                    <a href="index.html" style="display:block; padding:10px; background:#333; color:white; text-decoration:none; font-family:sans-serif; text-align:center;">← Retour au sommaire</a>
-                    {str(soup)}
-                    </body></html>
-                    """
+                    # Si pas de body (fragment HTML), on enveloppe le tout
+                    final_html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{subject}</title></head><body>{back_btn_html}{final_html}</body></html>"""
 
                 filename = f"{OUTPUT_FOLDER}/{clean_filename(subject)}"
                 with open(filename, "w", encoding='utf-8') as f:
