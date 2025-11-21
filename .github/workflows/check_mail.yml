@@ -1,0 +1,35 @@
+name: Check Newsletter
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # Toutes les 15 minutes
+  workflow_dispatch: # Permet de lancer manuellement pour tester
+
+jobs:
+  process-email:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Email Processor
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: python process_email.py
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name 'NewsletterBot'
+          git config --global user.email 'bot@noreply.com'
+          git add newsletters/
+          # Ne commit que s'il y a des changements
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Nouvelle newsletter reçue" && git push)
