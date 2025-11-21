@@ -6,12 +6,13 @@ import os
 import re
 import mimetypes
 import requests
+import datetime
 
 # --- CONFIGURATION ---
 GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
 TARGET_LABEL = "Netlify-News"
-# IMPORTANT : Pour GitHub Pages, on utilise souvent le dossier 'docs'
+# On garde 'docs' pour la compatibilité GitHub Pages
 OUTPUT_FOLDER = "docs"
 
 HEADERS = {
@@ -22,43 +23,80 @@ def clean_filename(text):
     s = re.sub(r'[\\/*?:"<>|]', "", text)
     return s.replace(" ", "_")[:50]
 
-def create_landing_page():
-    # Crée une page d'accueil neutre pour éviter l'erreur 404
-    # Mais ne liste PAS les newsletters pour la confidentialité.
-    index_content = """
+def generate_index():
+    print("Mise à jour du sommaire...")
+    if not os.path.exists(OUTPUT_FOLDER):
+        return
+        
+    # On récupère tous les fichiers HTML sauf index.html
+    files = [f for f in os.listdir(OUTPUT_FOLDER) if f.endswith(".html") and f != "index.html"]
+    
+    # Tri par date de modification (le plus récent en haut)
+    files.sort(key=lambda x: os.path.getmtime(os.path.join(OUTPUT_FOLDER, x)), reverse=True)
+
+    links_html = ""
+    for f in files:
+        # On rend le nom plus joli pour l'affichage
+        name_display = f.replace(".html", "").replace("_", " ")
+        
+        # On récupère la date du fichier pour l'afficher
+        filepath = os.path.join(OUTPUT_FOLDER, f)
+        timestamp = os.path.getmtime(filepath)
+        date_str = datetime.datetime.fromtimestamp(timestamp).strftime('%d/%m/%Y')
+
+        links_html += f'''
+        <li>
+            <a href="{f}">
+                <div class="link-content">
+                    <span class="icon">📧</span>
+                    <span class="title">{name_display}</span>
+                </div>
+                <span class="date">{date_str}</span>
+            </a>
+        </li>
+        '''
+
+    index_content = f"""
     <!DOCTYPE html>
     <html lang="fr">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Espace Archivage</title>
+        <title>Archives Newsletters</title>
         <style>
-            body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f4f9; color: #555; }
-            .box { text-align: center; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f6f9fc; margin: 0; padding: 20px; color: #333; }}
+            .container {{ max-width: 800px; margin: 40px auto; background: white; padding: 40px; border-radius: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
+            h1 {{ text-align: center; color: #1a1a1a; margin-bottom: 40px; font-size: 1.8rem; border-bottom: 2px solid #f0f0f0; padding-bottom: 20px; }}
+            ul {{ list-style: none; padding: 0; }}
+            li {{ margin-bottom: 12px; }}
+            a {{ display: flex; justify-content: space-between; align-items: center; padding: 18px 25px; background: #fff; border: 1px solid #eaeaea; border-radius: 10px; text-decoration: none; color: #2c3e50; transition: all 0.2s ease; }}
+            a:hover {{ transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.05); border-color: #0070f3; color: #0070f3; }}
+            .link-content {{ display: flex; align-items: center; }}
+            .icon {{ font-size: 1.2rem; margin-right: 15px; }}
+            .title {{ font-weight: 600; font-size: 1.05rem; }}
+            .date {{ font-size: 0.85rem; color: #888; background: #f4f4f4; padding: 5px 10px; border-radius: 20px; }}
+            a:hover .date {{ background: #e8f0fe; color: #0070f3; }}
         </style>
     </head>
     <body>
-        <div class="box">
-            <h1>🔒 Espace Archivage</h1>
-            <p>Cet espace est réservé au stockage des newsletters.</p>
+        <div class="container">
+            <h1>📬 Mes Newsletters</h1>
+            <ul>
+                {links_html}
+            </ul>
         </div>
     </body>
     </html>
     """
-    if not os.path.exists(OUTPUT_FOLDER):
-        os.makedirs(OUTPUT_FOLDER)
-        
+    
     with open(f"{OUTPUT_FOLDER}/index.html", "w", encoding='utf-8') as f:
         f.write(index_content)
-    print("Page d'accueil neutre générée.")
+    print("Sommaire généré avec succès.")
 
 def process_emails():
     try:
         if not os.path.exists(OUTPUT_FOLDER):
             os.makedirs(OUTPUT_FOLDER)
-
-        # On s'assure que la page d'accueil existe toujours
-        create_landing_page()
 
         print("Connexion au serveur...")
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -67,6 +105,7 @@ def process_emails():
         
         status, messages = mail.search(None, 'UNSEEN')
         
+        # On traite les emails s'il y en a
         if messages[0]:
             for num in messages[0].split():
                 status, msg_data = mail.fetch(num, "(RFC822)")
@@ -99,12 +138,14 @@ def process_emails():
 
                 if not html_content: continue
 
-                # --- IMAGES ---
+                # --- TRAITEMENT HTML & IMAGES ---
                 soup = BeautifulSoup(html_content, "html.parser")
                 
+                # Suppression scripts
                 for s in soup(["script", "iframe", "object"]):
                     s.extract()
 
+                # Téléchargement Images
                 img_counter = 0
                 for img in soup.find_all("img"):
                     src = img.get("src")
@@ -112,39 +153,4 @@ def process_emails():
                         continue
 
                     try:
-                        if src.startswith("//"): src = "https:" + src
-                        
-                        response = requests.get(src, headers=HEADERS, timeout=10)
-                        if response.status_code == 200:
-                            content_type = response.headers.get('content-type')
-                            ext = mimetypes.guess_extension(content_type) or ".jpg"
-                            img_name = f"{safe_subject}_img_{img_counter}{ext}"
-                            img_path = os.path.join(OUTPUT_FOLDER, img_name)
-                            
-                            with open(img_path, "wb") as f:
-                                f.write(response.content)
-                            
-                            img['src'] = img_name
-                            if img.has_attr('srcset'): del img['srcset']
-                            img_counter += 1
-                    except Exception:
-                        pass # On ignore les erreurs d'image pour ne pas bloquer
-
-                # --- SAUVEGARDE ---
-                filename = f"{OUTPUT_FOLDER}/{safe_subject}.html"
-                with open(filename, "w", encoding='utf-8') as f:
-                    f.write(str(soup))
-                    
-            print("Traitement terminé.")
-        else:
-            print("Aucun nouvel email.")
-
-        mail.close()
-        mail.logout()
-
-    except Exception as e:
-        print(f"Erreur: {e}")
-        raise e
-
-if __name__ == "__main__":
-    process_emails()
+                        if src.startswith
