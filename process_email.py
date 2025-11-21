@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 import os
 import re
 import mimetypes
+import requests
 
 # --- CONFIGURATION ---
 GMAIL_USER = os.environ["GMAIL_USER"]
@@ -12,62 +13,14 @@ GMAIL_PASSWORD = os.environ["GMAIL_PASSWORD"]
 TARGET_LABEL = "Netlify-News"
 OUTPUT_FOLDER = "newsletters"
 
+# On se fait passer pour un navigateur pour éviter d'être bloqué par les serveurs d'images
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+}
+
 def clean_filename(text):
-    # Nettoie le texte pour en faire un nom de fichier valide
     s = re.sub(r'[\\/*?:"<>|]', "", text)
     return s.replace(" ", "_")[:50]
-
-def generate_index():
-    print("Mise à jour du sommaire...")
-    if not os.path.exists(OUTPUT_FOLDER):
-        return
-        
-    files = [f for f in os.listdir(OUTPUT_FOLDER) if f.endswith(".html") and f != "index.html"]
-    files.sort(key=lambda x: os.path.getmtime(os.path.join(OUTPUT_FOLDER, x)), reverse=True)
-
-    links_html = ""
-    for f in files:
-        name_display = f.replace(".html", "").replace("_", " ")
-        links_html += f'''
-        <li>
-            <a href="{f}">
-                <span class="icon">📧</span>
-                <span class="title">{name_display}</span>
-            </a>
-        </li>
-        '''
-
-    index_content = f"""
-    <!DOCTYPE html>
-    <html lang="fr">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Mes Newsletters</title>
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f4f9; margin: 0; padding: 20px; color: #333; }}
-            .container {{ max-width: 800px; margin: 40px auto; background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }}
-            h1 {{ text-align: center; color: #2c3e50; margin-bottom: 40px; font-size: 2rem; }}
-            ul {{ list-style: none; padding: 0; }}
-            li {{ margin-bottom: 15px; }}
-            a {{ display: flex; align-items: center; padding: 20px; background: #fff; border: 1px solid #eaeaea; border-radius: 12px; text-decoration: none; color: #2c3e50; transition: all 0.2s ease; }}
-            a:hover {{ transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.08); border-color: #0070f3; }}
-            .icon {{ font-size: 1.5rem; margin-right: 15px; }}
-            .title {{ font-weight: 600; font-size: 1.1rem; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>📬 Archives Newsletters</h1>
-            <ul>
-                {links_html}
-            </ul>
-        </div>
-    </body>
-    </html>
-    """
-    with open(f"{OUTPUT_FOLDER}/index.html", "w", encoding='utf-8') as f:
-        f.write(index_content)
 
 def process_emails():
     try:
@@ -99,82 +52,81 @@ def process_emails():
                 safe_subject = clean_filename(subject)
                 print(f"Traitement de : {subject}")
 
-                # --- 2. EXTRACTION IMAGES & HTML ---
+                # --- 2. EXTRACTION CONTENU ---
                 html_content = ""
-                images_cid = {} # Dictionnaire pour stocker les liens cid -> fichier local
-
-                # On parcourt toutes les parties du mail (texte, html, images attachées)
+                
                 for part in msg.walk():
                     content_type = part.get_content_type()
                     content_disposition = str(part.get("Content-Disposition"))
 
-                    # Si c'est le HTML
                     if content_type == "text/html" and "attachment" not in content_disposition:
                         html_content = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8')
-                    
-                    # Si c'est une image
-                    if "image" in content_type:
-                        # On cherche l'ID de l'image (cid)
-                        cid = part.get("Content-ID")
-                        if cid:
-                            # Nettoyage du cid (<12345> -> 12345)
-                            cid_clean = cid.strip('<>')
-                            
-                            # Extension fichier
-                            ext = mimetypes.guess_extension(content_type) or ".jpg"
-                            image_filename = f"{safe_subject}_img_{cid_clean}{ext}"
-                            image_filename = clean_filename(image_filename) # Sécurité nom
-                            
-                            # Sauvegarde de l'image sur le disque
-                            filepath = os.path.join(OUTPUT_FOLDER, image_filename)
-                            with open(filepath, "wb") as f:
-                                f.write(part.get_payload(decode=True))
-                            
-                            # On mémorise : "Quand tu vois ce CID, utilise ce fichier"
-                            images_cid[cid_clean] = image_filename
+                        break # On a trouvé le HTML principal
+                
+                # Fallback si pas de multipart
+                if not html_content and not msg.is_multipart():
+                    html_content = msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8')
 
                 if not html_content: 
                     print("  -> Pas de contenu HTML trouvé.")
                     continue
 
-                # --- 3. TRAITEMENT DU HTML ---
+                # --- 3. TRAITEMENT & TÉLÉCHARGEMENT IMAGES ---
                 soup = BeautifulSoup(html_content, "html.parser")
 
-                # A. Réparation des images attachées (CID)
-                for img in soup.find_all("img"):
-                    if img.get("src") and "cid:" in img["src"]:
-                        cid_in_src = img["src"].replace("cid:", "").strip()
-                        if cid_in_src in images_cid:
-                            img["src"] = images_cid[cid_in_src]
-                
-                # B. Réparation HTTP -> HTTPS (Mixed Content Fix)
-                for img in soup.find_all("img"):
-                    if img.get("src") and img["src"].startswith("http://"):
-                        # On tente de passer en HTTPS. 99% des serveurs modernes le supportent.
-                        img["src"] = img["src"].replace("http://", "https://")
-
-                # C. Sécurité Scripts
+                # A. Suppression scripts dangereux
                 for s in soup(["script", "iframe", "object"]):
                     s.extract()
 
-                # D. Bouton Retour
-                back_btn_html = BeautifulSoup('''
-                <div style="background-color: #1a1a1a; color: white; padding: 10px; text-align: center; font-family: sans-serif; font-size: 14px; position: relative; z-index: 99999;">
-                    <a href="index.html" style="color: white; text-decoration: none; font-weight: bold;">
-                        ← Retour au sommaire
-                    </a>
-                </div>
-                ''', 'html.parser')
+                # B. Gestion des images (Le coeur du correctif)
+                img_counter = 0
+                for img in soup.find_all("img"):
+                    src = img.get("src")
+                    
+                    if not src:
+                        continue
 
-                if soup.body:
-                    soup.body.insert(0, back_btn_html)
-                else:
-                    new_body = soup.new_tag("body")
-                    new_body.insert(0, back_btn_html)
-                    new_body.extend(soup.contents)
-                    soup.append(new_body)
+                    # Si c'est déjà une image base64 ou cid, on passe (cid géré par ailleurs si besoin, mais ici on vise les liens http)
+                    if src.startswith("data:") or src.startswith("cid:"):
+                        continue
+
+                    try:
+                        # Gestion des liens relatifs protocol-less (//example.com)
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        
+                        # Téléchargement
+                        response = requests.get(src, headers=HEADERS, timeout=10)
+                        if response.status_code == 200:
+                            # Déterminer l'extension
+                            content_type = response.headers.get('content-type')
+                            ext = mimetypes.guess_extension(content_type) or ".jpg"
+                            
+                            # Nom unique pour l'image
+                            img_name = f"{safe_subject}_img_{img_counter}{ext}"
+                            img_path = os.path.join(OUTPUT_FOLDER, img_name)
+                            
+                            # Sauvegarde locale
+                            with open(img_path, "wb") as f:
+                                f.write(response.content)
+                            
+                            # Remplacement du lien dans le HTML par le fichier local
+                            img['src'] = img_name
+                            # On retire srcset pour forcer l'usage du src local
+                            if img.has_attr('srcset'):
+                                del img['srcset']
+                                
+                            img_counter += 1
+                            print(f"  -> Image téléchargée : {src[:30]}...")
+                        else:
+                            print(f"  -> Échec téléchargement (Code {response.status_code}): {src[:30]}...")
+                    
+                    except Exception as e:
+                        print(f"  -> Erreur téléchargement image : {e}")
+                        # En cas d'erreur, on laisse le lien original
 
                 # --- 4. SAUVEGARDE ---
+                # On ne met PLUS le bouton retour
                 filename = f"{OUTPUT_FOLDER}/{safe_subject}.html"
                 with open(filename, "w", encoding='utf-8') as f:
                     f.write(str(soup))
@@ -185,7 +137,7 @@ def process_emails():
 
         mail.close()
         mail.logout()
-        generate_index()
+        # On ne génère plus l'index pour la confidentialité (ou on le garde secret sans liens vers lui)
 
     except Exception as e:
         print(f"Erreur critique : {e}")
