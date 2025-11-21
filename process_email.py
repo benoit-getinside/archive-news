@@ -1,7 +1,7 @@
 import imaplib
 import email
 from email.header import decode_header
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 import os
 import re
 
@@ -64,7 +64,7 @@ def process_emails():
         mail.login(GMAIL_USER, GMAIL_PASSWORD)
         mail.select(TARGET_LABEL)
         
-        # On cherche tous les emails (pas seulement UNSEEN pour ce test si besoin, sinon remettre 'UNSEEN')
+        # 'UNSEEN' pour les nouveaux, ou None pour tous (attention aux doublons si None)
         status, messages = mail.search(None, 'UNSEEN')
         
         if messages[0]:
@@ -94,38 +94,53 @@ def process_emails():
 
                 if not html_content: continue
 
-                # --- CORRECTION MAJEURE : FIDÉLITÉ TOTALE ---
-                soup = BeautifulSoup(html_content, "html.parser")
+                # --- CIBLAGE PRÉCIS ---
+                original_soup = BeautifulSoup(html_content, "html.parser")
                 
-                # 1. On enlève les scripts (JS) par sécurité
-                for s in soup(["script"]):
+                # 1. Nettoyage (Sécurité uniquement)
+                for s in original_soup(["script", "iframe", "object"]):
                     s.extract()
 
-                # 2. On enlève les métadonnées de transfert Gmail (si le mail a été transféré)
-                # (Ex: "De: Machin, Envoyé le: ...")
-                for gmail_attr in soup.select('.gmail_attr'):
-                    gmail_attr.extract()
+                # 2. Création d'une structure propre
+                new_soup = BeautifulSoup("<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body></body></html>", "html.parser")
                 
-                # 3. On ne cherche PAS de table spécifique. On prend TOUT le HTML.
-                # On ajoute juste le bouton retour en haut.
-                
-                final_html = str(soup)
-                
-                # Ajout du bouton retour de manière "propre" sans casser la structure
-                # On l'injecte juste après l'ouverture du <body>
-                back_btn_html = '<a href="index.html" style="display:block; padding:10px; background:#222; color:white; text-decoration:none; font-family:sans-serif; font-size:14px; text-align:center; position:relative; z-index:9999;">← Retour au sommaire</a>'
-                
-                if "<body>" in final_html:
-                     final_html = final_html.replace("<body>", f"<body>{back_btn_html}")
-                elif "<BODY>" in final_html: # Au cas où c'est en majuscules
-                     final_html = final_html.replace("<BODY>", f"<BODY>{back_btn_html}")
-                else:
-                    # Si pas de body (fragment HTML), on enveloppe le tout
-                    final_html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{subject}</title></head><body>{back_btn_html}{final_html}</body></html>"""
+                # Titre
+                new_tag = new_soup.new_tag("title")
+                new_tag.string = subject
+                new_soup.head.append(new_tag)
+
+                # 3. Récupération des styles CSS originaux (Important pour le design !)
+                # On copie tous les <style> du mail original vers le nouveau
+                for style in original_soup.find_all("style"):
+                    new_soup.head.append(style)
+
+                # 4. EXTRACTION DU CONTENU (Le coeur du correctif)
+                # On cherche la DIV magique que vous m'avez montrée (celle qui contient tout)
+                # Regex : on cherche un ID qui finit par "bodyTable" (ex: m_247...bodyTable)
+                main_content = original_soup.find("div", id=re.compile(r"bodyTable$"))
+
+                if not main_content:
+                    # Fallback : Si on ne trouve pas l'ID spécifique, on prend le body entier
+                    main_content = original_soup.body
+
+                # 5. Ajout du bouton retour
+                back_btn = new_soup.new_tag("a", href="index.html")
+                back_btn.string = "← Retour au sommaire"
+                back_btn['style'] = "display:block; padding:15px; background:#222; color:white; text-decoration:none; font-family:sans-serif; font-size:14px; text-align:center; font-weight:bold;"
+                new_soup.body.append(back_btn)
+
+                # 6. Injection du contenu
+                if main_content:
+                    # Si c'est le body, on prend ses enfants pour éviter d'avoir <body><body>
+                    if main_content.name == 'body':
+                        for child in main_content.contents:
+                            new_soup.body.append(child)
+                    else:
+                        new_soup.body.append(main_content)
 
                 filename = f"{OUTPUT_FOLDER}/{clean_filename(subject)}"
                 with open(filename, "w", encoding='utf-8') as f:
-                    f.write(final_html)
+                    f.write(str(new_soup))
 
             mail.close()
             mail.logout()
