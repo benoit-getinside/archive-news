@@ -12,21 +12,16 @@ TARGET_LABEL = "Netlify-News"
 OUTPUT_FOLDER = "newsletters"
 
 def clean_filename(subject):
-    # Nettoie le nom du fichier
     s = re.sub(r'[\\/*?:"<>|]', "", subject)
     return s.replace(" ", "_")[:50] + ".html"
 
 def generate_index():
-    # Cette fonction crée la page d'accueil (Sommaire)
     print("Génération du sommaire...")
     files = [f for f in os.listdir(OUTPUT_FOLDER) if f.endswith(".html") and f != "index.html"]
-    
-    # On peut trier les fichiers (facultatif, ici par nom)
-    files.sort()
+    files.sort(reverse=True) # On met les plus récents en haut (si tri par nom/date)
 
     links_html = ""
     for f in files:
-        # On crée un lien pour chaque newsletter
         name_display = f.replace(".html", "").replace("_", " ")
         links_html += f'<li><a href="{f}">{name_display}</a></li>\n'
 
@@ -37,48 +32,45 @@ def generate_index():
         <meta charset="UTF-8">
         <title>Mes Newsletters</title>
         <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; }}
-            h1 {{ border-bottom: 2px solid #eaeaea; padding-bottom: 10px; }}
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; background-color: #f4f4f4; }}
+            .container {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+            h1 {{ border-bottom: 2px solid #eaeaea; padding-bottom: 10px; color: #333; }}
             ul {{ list-style-type: none; padding: 0; }}
-            li {{ margin: 10px 0; border: 1px solid #eaeaea; border-radius: 8px; transition: background 0.2s; }}
-            li:hover {{ background: #f9f9f9; }}
+            li {{ margin: 10px 0; border: 1px solid #eaeaea; border-radius: 8px; transition: background 0.2s; background: white; }}
+            li:hover {{ background: #f0f7ff; border-color: #0070f3; }}
             a {{ display: block; padding: 15px; text-decoration: none; color: #333; font-weight: 500; }}
-            a:hover {{ color: #0070f3; }}
         </style>
     </head>
     <body>
-        <h1>📬 Archives Newsletters</h1>
-        <ul>
-            {links_html}
-        </ul>
+        <div class="container">
+            <h1>📬 Archives Newsletters</h1>
+            <ul>
+                {links_html}
+            </ul>
+        </div>
     </body>
     </html>
     """
-    
     with open(f"{OUTPUT_FOLDER}/index.html", "w", encoding='utf-8') as f:
         f.write(index_content)
 
 def process_emails():
     try:
-        # 1. Préparation dossier
         if not os.path.exists(OUTPUT_FOLDER):
             os.makedirs(OUTPUT_FOLDER)
 
-        # 2. Connexion Gmail
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(GMAIL_USER, GMAIL_PASSWORD)
         mail.select(TARGET_LABEL)
         
         status, messages = mail.search(None, 'UNSEEN')
         
-        # Même si pas de nouveaux messages, on régénère l'index au cas où
-        new_emails_processed = False
-
         if messages[0]:
             for num in messages[0].split():
                 status, msg_data = mail.fetch(num, "(RFC822)")
                 msg = email.message_from_bytes(msg_data[0][1])
                 
+                # Décodage Sujet
                 subject_header = msg["Subject"]
                 if subject_header:
                     decoded_list = decode_header(subject_header)
@@ -102,35 +94,50 @@ def process_emails():
 
                 if not html_content: continue
 
-                # Nettoyage
+                # --- NOUVELLE LOGIQUE DE NETTOYAGE (DOUCE) ---
                 soup = BeautifulSoup(html_content, "html.parser")
-                for s in soup(["script", "style"]):
+                
+                # 1. SÉCURITÉ : On retire UNIQUEMENT les scripts (JS), mais ON GARDE le style (CSS)
+                for s in soup(["script"]):
                     s.extract()
 
-                main_content = soup.find("table")
-                final_html = main_content.prettify() if main_content else soup.prettify()
+                # 2. SUPPRESSION GMAIL : Si c'est un forward, on retire le bloc de citation Gmail
+                # Les classes souvent utilisées par Gmail : .gmail_quote, .gmail_attr
+                for gmail_div in soup.select('.gmail_quote, .gmail_attr'):
+                    gmail_div.extract()
 
-                # Page individuelle avec lien retour
-                full_page = f"""
-                <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{subject}</title>
-                <style>body{{margin:0 auto;max-width:800px;padding:20px;font-family:sans-serif;}} .back-btn{{display:inline-block;margin-bottom:20px;text-decoration:none;color:#666;}}</style>
-                </head><body>
-                <a href="index.html" class="back-btn">← Retour au sommaire</a>
-                {final_html}
-                </body></html>"""
+                # 3. CONSTRUCTION DE LA PAGE
+                # Si le mail a déjà une structure HTML complète (head/body), on la garde telle quelle
+                # Sinon, on l'enveloppe pour que l'encodage soit bon.
+                if soup.html:
+                    # On injecte juste un petit bouton retour en haut du body existant
+                    back_button = soup.new_tag("a", href="index.html")
+                    back_button.string = "← Retour au sommaire"
+                    back_button['style'] = "display:block; padding:10px; background:#333; color:white; text-decoration:none; font-family:sans-serif; font-size:14px; text-align:center;"
+                    
+                    if soup.body:
+                        soup.body.insert(0, back_button)
+                    
+                    final_html = str(soup) # On garde la structure exacte
+                else:
+                    # Cas rare : HTML partiel
+                    final_html = f"""
+                    <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{subject}</title></head>
+                    <body>
+                    <a href="index.html" style="display:block; padding:10px; background:#333; color:white; text-decoration:none; font-family:sans-serif; text-align:center;">← Retour au sommaire</a>
+                    {str(soup)}
+                    </body></html>
+                    """
 
                 filename = f"{OUTPUT_FOLDER}/{clean_filename(subject)}"
                 with open(filename, "w", encoding='utf-8') as f:
-                    f.write(full_page)
-                    new_emails_processed = True
+                    f.write(final_html)
 
             mail.close()
             mail.logout()
         else:
             print("Pas de nouveaux emails.")
 
-        # 3. Génération du Sommaire (Index)
-        # On le lance à chaque fois pour être sûr que la liste est à jour
         generate_index()
 
     except Exception as e:
